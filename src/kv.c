@@ -57,16 +57,14 @@ kv_destroy (kv_t *kv) {
   kv->capacity = 0;
 }
 
-int
-kv_put (kv_t *kv, const uint8_t *key, size_t key_len, const uint8_t *val, size_t val_len) {
+static int
+kv__put (kv_t *kv, uint8_t *new_key, size_t key_len, uint8_t *new_val, size_t val_len) {
   bool found;
-  size_t i = kv__search(kv, key, key_len, &found);
+  size_t i = kv__search(kv, new_key, key_len, &found);
 
   if (found) {
-    uint8_t *new_val = malloc(val_len);
-    if (new_val == NULL) return -1;
+    free(new_key);
     free(kv->entries[i].val);
-    memcpy(new_val, val, val_len);
     kv->entries[i].val = new_val;
     kv->entries[i].val_len = val_len;
     return 0;
@@ -75,22 +73,14 @@ kv_put (kv_t *kv, const uint8_t *key, size_t key_len, const uint8_t *val, size_t
   if (kv->len == kv->capacity) {
     size_t new_capacity = kv->capacity == 0 ? 4 : kv->capacity * 2;
     kv_entry_t *new_entries = realloc(kv->entries, new_capacity * sizeof(kv_entry_t));
-    if (new_entries == NULL) return -1;
+    if (new_entries == NULL) {
+      free(new_key);
+      free(new_val);
+      return -1;
+    }
     kv->entries = new_entries;
     kv->capacity = new_capacity;
   }
-
-  uint8_t *new_key = malloc(key_len);
-  uint8_t *new_val = malloc(val_len);
-
-  if (new_key == NULL || new_val == NULL) {
-    free(new_key);
-    free(new_val);
-    return -1;
-  }
-
-  memcpy(new_key, key, key_len);
-  memcpy(new_val, val, val_len);
 
   memmove(&kv->entries[i + 1], &kv->entries[i], (kv->len - i) * sizeof(kv_entry_t));
 
@@ -104,6 +94,23 @@ kv_put (kv_t *kv, const uint8_t *key, size_t key_len, const uint8_t *val, size_t
   kv->len++;
 
   return 0;
+}
+
+int
+kv_put (kv_t *kv, const uint8_t *key, size_t key_len, const uint8_t *val, size_t val_len) {
+  uint8_t *new_key = malloc(key_len);
+  uint8_t *new_val = malloc(val_len);
+
+  if (new_key == NULL || new_val == NULL) {
+    free(new_key);
+    free(new_val);
+    return -1;
+  }
+
+  memcpy(new_key, key, key_len);
+  memcpy(new_val, val, val_len);
+
+  return kv__put(kv, new_key, key_len, new_val, val_len);
 }
 
 int
@@ -220,22 +227,30 @@ kv_write_batch_del (kv_write_batch_t *batch, const uint8_t *key, size_t key_len)
 
 int
 kv_write_batch_flush (kv_write_batch_t *batch) {
-  for (size_t i = 0; i < batch->len; i++) {
+  int err = 0;
+  size_t i = 0;
+
+  for (; i < batch->len; i++) {
     kv_write_op_t *op = &batch->ops[i];
     if (op->del) {
       kv_del(batch->kv, op->key, op->key_len);
+      free(op->key);
     } else {
-      if (kv_put(batch->kv, op->key, op->key_len, op->val, op->val_len) < 0) return -1;
+      if (kv__put(batch->kv, op->key, op->key_len, op->val, op->val_len) < 0) {
+        err = -1;
+        i++;
+        break;
+      }
     }
   }
 
-  for (size_t i = 0; i < batch->len; i++) {
+  for (; i < batch->len; i++) {
     free(batch->ops[i].key);
     free(batch->ops[i].val);
   }
-  batch->len = 0;
 
-  return 0;
+  batch->len = 0;
+  return err;
 }
 
 void

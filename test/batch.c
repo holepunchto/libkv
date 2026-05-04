@@ -46,5 +46,46 @@ main () {
   assert(vmiss == NULL);
 
   kv_read_batch_destroy(&rb);
+
+  // grow: hint of 0, queue many ops to force capacity doubling
+  kv_write_batch_t wb2;
+  kv_write_batch_init(&wb2, &kv, 0);
+  assert(wb2.capacity == 0);
+
+  for (int i = 0; i < 100; i++) {
+    uint8_t key[2] = {'k', (uint8_t) i};
+    uint8_t val[2] = {'v', (uint8_t) i};
+    kv_write_batch_put(&wb2, key, 2, val, 2);
+  }
+
+  assert(wb2.len == 100);
+  assert(wb2.capacity >= 100);
+
+  kv_write_batch_flush(&wb2);
+  kv_write_batch_destroy(&wb2);
+
+  kv_read_batch_t rb2;
+  kv_read_batch_init(&rb2, &kv, 0);
+
+  uint8_t keys[100][2];
+  const uint8_t *vals[100] = {0};
+  size_t lens[100] = {0};
+
+  for (int i = 0; i < 100; i++) {
+    keys[i][0] = 'k';
+    keys[i][1] = (uint8_t) i;
+    kv_read_batch_get(&rb2, keys[i], 2, &vals[i], &lens[i]);
+  }
+
+  assert(rb2.capacity >= 100);
+
+  kv_read_batch_flush(&rb2);
+
+  for (int i = 0; i < 100; i++) {
+    assert(lens[i] == 2);
+    assert(vals[i][0] == 'v' && vals[i][1] == (uint8_t) i);
+  }
+
+  kv_read_batch_destroy(&rb2);
   kv_destroy(&kv);
 }
