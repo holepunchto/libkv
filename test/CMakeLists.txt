@@ -21,3 +21,13 @@ target_link_libraries(
 )
 
 add_test(NAME many COMMAND many)
+
+add_executable(batch batch.c)
+
+target_link_libraries(
+  batch
+  PRIVATE
+  kv
+)
+
+add_test(NAME batch COMMAND batch)
