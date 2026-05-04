@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -5,8 +6,22 @@
 #include "../include/kv.h"
 
 static int
+kv__copy (uint8_t **out, const uint8_t *src, size_t len) {
+  if (len == 0) {
+    *out = NULL;
+    return 0;
+  }
+  uint8_t *dst = malloc(len);
+  if (dst == NULL) return -1;
+  memcpy(dst, src, len);
+  *out = dst;
+  return 0;
+}
+
+static int
 kv__compare (const uint8_t *a, size_t a_len, const uint8_t *b, size_t b_len) {
-  int cmp = memcmp(a, b, a_len < b_len ? a_len : b_len);
+  size_t min = a_len < b_len ? a_len : b_len;
+  int cmp = min == 0 ? 0 : memcmp(a, b, min);
   if (cmp != 0) return cmp;
   if (a_len < b_len) return -1;
   if (a_len > b_len) return 1;
@@ -98,32 +113,55 @@ kv__put (kv_t *kv, uint8_t *new_key, size_t key_len, uint8_t *new_val, size_t va
 
 int
 kv_put (kv_t *kv, const uint8_t *key, size_t key_len, const uint8_t *val, size_t val_len) {
-  uint8_t *new_key = malloc(key_len);
-  uint8_t *new_val = malloc(val_len);
-
-  if (new_key == NULL || new_val == NULL) {
+  uint8_t *new_key, *new_val;
+  if (kv__copy(&new_key, key, key_len) < 0) return -1;
+  if (kv__copy(&new_val, val, val_len) < 0) {
     free(new_key);
-    free(new_val);
     return -1;
   }
-
-  memcpy(new_key, key, key_len);
-  memcpy(new_val, val, val_len);
-
   return kv__put(kv, new_key, key_len, new_val, val_len);
 }
 
-int
-kv_get (kv_t *kv, const uint8_t *key, size_t key_len, const uint8_t **val, size_t *val_len) {
+static kv_status_t
+kv__lookup (kv_t *kv, const uint8_t *key, size_t key_len, uint8_t **val_out, size_t *val_len_out) {
+  *val_out = NULL;
+  *val_len_out = 0;
+
   bool found;
   size_t i = kv__search(kv, key, key_len, &found);
 
-  if (!found) return -1;
+  if (!found) return KV_NOT_FOUND;
 
-  if (val) *val = kv->entries[i].val;
-  if (val_len) *val_len = kv->entries[i].val_len;
+  kv_entry_t *e = &kv->entries[i];
+  if (kv__copy(val_out, e->val, e->val_len) < 0) return KV_ERROR;
+  *val_len_out = e->val_len;
 
-  return 0;
+  return KV_OK;
+}
+
+int
+kv_get (kv_t *kv, const uint8_t *key, size_t key_len, uint8_t **val, size_t *val_len) {
+  uint8_t *v = NULL;
+  size_t vl = 0;
+  kv_status_t status = kv__lookup(kv, key, key_len, &v, &vl);
+
+  if (val) *val = v;
+  else free(v);
+
+  if (val_len) *val_len = vl;
+
+  return status == KV_OK ? 0 : -1;
+}
+
+int
+kv_get_cb (kv_t *kv, const uint8_t *key, size_t key_len, kv_read_cb cb, void *data) {
+  assert(cb != NULL);
+
+  uint8_t *val = NULL;
+  size_t val_len = 0;
+  kv_status_t status = kv__lookup(kv, key, key_len, &val, &val_len);
+
+  return cb(status, key, key_len, val, val_len, data);
 }
 
 int
@@ -183,17 +221,12 @@ int
 kv_write_batch_put (kv_write_batch_t *batch, const uint8_t *key, size_t key_len, const uint8_t *val, size_t val_len) {
   if (kv__write_batch_grow(batch) < 0) return -1;
 
-  uint8_t *new_key = malloc(key_len);
-  uint8_t *new_val = malloc(val_len);
-
-  if (new_key == NULL || new_val == NULL) {
+  uint8_t *new_key, *new_val;
+  if (kv__copy(&new_key, key, key_len) < 0) return -1;
+  if (kv__copy(&new_val, val, val_len) < 0) {
     free(new_key);
-    free(new_val);
     return -1;
   }
-
-  memcpy(new_key, key, key_len);
-  memcpy(new_val, val, val_len);
 
   batch->ops[batch->len++] = (kv_write_op_t){
     .del = false,
@@ -210,9 +243,8 @@ int
 kv_write_batch_del (kv_write_batch_t *batch, const uint8_t *key, size_t key_len) {
   if (kv__write_batch_grow(batch) < 0) return -1;
 
-  uint8_t *new_key = malloc(key_len);
-  if (new_key == NULL) return -1;
-  memcpy(new_key, key, key_len);
+  uint8_t *new_key;
+  if (kv__copy(&new_key, key, key_len) < 0) return -1;
 
   batch->ops[batch->len++] = (kv_write_op_t){
     .del = true,
@@ -274,21 +306,46 @@ kv_read_batch_destroy (kv_read_batch_t *batch) {
   batch->capacity = 0;
 }
 
+static int
+kv__read_batch_grow (kv_read_batch_t *batch) {
+  if (batch->len < batch->capacity) return 0;
+  size_t new_capacity = batch->capacity == 0 ? 4 : batch->capacity * 2;
+  kv_read_req_t *new_reqs = realloc(batch->reqs, new_capacity * sizeof(kv_read_req_t));
+  if (new_reqs == NULL) return -1;
+  batch->reqs = new_reqs;
+  batch->capacity = new_capacity;
+  return 0;
+}
+
 int
-kv_read_batch_get (kv_read_batch_t *batch, const uint8_t *key, size_t key_len, const uint8_t **val, size_t *val_len) {
-  if (batch->len == batch->capacity) {
-    size_t new_capacity = batch->capacity == 0 ? 4 : batch->capacity * 2;
-    kv_read_req_t *new_reqs = realloc(batch->reqs, new_capacity * sizeof(kv_read_req_t));
-    if (new_reqs == NULL) return -1;
-    batch->reqs = new_reqs;
-    batch->capacity = new_capacity;
-  }
+kv_read_batch_get (kv_read_batch_t *batch, const uint8_t *key, size_t key_len, uint8_t **val, size_t *val_len) {
+  if (kv__read_batch_grow(batch) < 0) return -1;
 
   batch->reqs[batch->len++] = (kv_read_req_t){
     .key = key,
     .key_len = key_len,
     .val = val,
     .val_len = val_len,
+    .cb = NULL,
+    .data = NULL,
+  };
+
+  return 0;
+}
+
+int
+kv_read_batch_get_cb (kv_read_batch_t *batch, const uint8_t *key, size_t key_len, kv_read_cb cb, void *data) {
+  assert(cb != NULL);
+
+  if (kv__read_batch_grow(batch) < 0) return -1;
+
+  batch->reqs[batch->len++] = (kv_read_req_t){
+    .key = key,
+    .key_len = key_len,
+    .val = NULL,
+    .val_len = NULL,
+    .cb = cb,
+    .data = data,
   };
 
   return 0;
@@ -296,10 +353,25 @@ kv_read_batch_get (kv_read_batch_t *batch, const uint8_t *key, size_t key_len, c
 
 int
 kv_read_batch_flush (kv_read_batch_t *batch) {
+  int err = 0;
+
   for (size_t i = 0; i < batch->len; i++) {
     kv_read_req_t *req = &batch->reqs[i];
-    kv_get(batch->kv, req->key, req->key_len, req->val, req->val_len);
+
+    uint8_t *val = NULL;
+    size_t val_len = 0;
+    kv_status_t status = kv__lookup(batch->kv, req->key, req->key_len, &val, &val_len);
+
+    if (req->cb) {
+      int cb_ret = req->cb(status, req->key, req->key_len, val, val_len, req->data);
+      if (err == 0 && cb_ret != 0) err = cb_ret;
+    } else {
+      if (status == KV_ERROR && err == 0) err = -1;
+      if (req->val) *req->val = val;
+      else free(val);
+      if (req->val_len) *req->val_len = val_len;
+    }
   }
   batch->len = 0;
-  return 0;
+  return err;
 }

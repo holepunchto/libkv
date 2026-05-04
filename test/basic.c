@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "../include/kv.h"
@@ -17,20 +18,27 @@ main () {
   assert(kv.entries[1].key[0] == 'b');
   assert(kv.entries[2].key[0] == 'c');
 
-  const uint8_t *val;
+  uint8_t *val;
   size_t val_len;
 
   kv_get(&kv, (uint8_t *) "b", 1, &val, &val_len);
   assert(val_len == 1 && val[0] == '2');
+  free(val);
 
   kv_put(&kv, (uint8_t *) "b", 1, (uint8_t *) "99", 2);
   kv_get(&kv, (uint8_t *) "b", 1, &val, &val_len);
   assert(val_len == 2 && memcmp(val, "99", 2) == 0);
+  free(val);
 
   kv_del(&kv, (uint8_t *) "b", 1);
   assert(kv.len == 2);
   assert(kv_get(&kv, (uint8_t *) "b", 1, NULL, NULL) == -1);
   assert(kv_del(&kv, (uint8_t *) "b", 1) == -1);
+
+  // empty value
+  assert(kv_put(&kv, (uint8_t *) "empty", 5, NULL, 0) == 0);
+  assert(kv_get(&kv, (uint8_t *) "empty", 5, &val, &val_len) == 0);
+  assert(val == NULL && val_len == 0);
 
   kv_destroy(&kv);
 }

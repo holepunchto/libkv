@@ -10,12 +10,20 @@ extern "C" {
 
 #include <stdbool.h>
 
+typedef enum {
+  KV_OK = 0,
+  KV_NOT_FOUND = 1,
+  KV_ERROR = -1,
+} kv_status_t;
+
 typedef struct kv_entry_s kv_entry_t;
 typedef struct kv_s kv_t;
 typedef struct kv_write_op_s kv_write_op_t;
 typedef struct kv_write_batch_s kv_write_batch_t;
 typedef struct kv_read_req_s kv_read_req_t;
 typedef struct kv_read_batch_s kv_read_batch_t;
+
+typedef int (*kv_read_cb)(kv_status_t status, const uint8_t *key, size_t key_len, uint8_t *val, size_t val_len, void *data);
 
 struct kv_entry_s {
   uint8_t *key;
@@ -48,8 +56,10 @@ struct kv_write_batch_s {
 struct kv_read_req_s {
   const uint8_t *key;
   size_t key_len;
-  const uint8_t **val;
+  uint8_t **val;
   size_t *val_len;
+  kv_read_cb cb;
+  void *data;
 };
 
 struct kv_read_batch_s {
@@ -69,7 +79,10 @@ int
 kv_put (kv_t *kv, const uint8_t *key, size_t key_len, const uint8_t *val, size_t val_len);
 
 int
-kv_get (kv_t *kv, const uint8_t *key, size_t key_len, const uint8_t **val, size_t *val_len);
+kv_get (kv_t *kv, const uint8_t *key, size_t key_len, uint8_t **val, size_t *val_len);
+
+int
+kv_get_cb (kv_t *kv, const uint8_t *key, size_t key_len, kv_read_cb cb, void *data);
 
 int
 kv_del (kv_t *kv, const uint8_t *key, size_t key_len);
@@ -96,7 +109,10 @@ void
 kv_read_batch_destroy (kv_read_batch_t *batch);
 
 int
-kv_read_batch_get (kv_read_batch_t *batch, const uint8_t *key, size_t key_len, const uint8_t **val, size_t *val_len);
+kv_read_batch_get (kv_read_batch_t *batch, const uint8_t *key, size_t key_len, uint8_t **val, size_t *val_len);
+
+int
+kv_read_batch_get_cb (kv_read_batch_t *batch, const uint8_t *key, size_t key_len, kv_read_cb cb, void *data);
 
 int
 kv_read_batch_flush (kv_read_batch_t *batch);

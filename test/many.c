@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "../include/kv.h"
 
@@ -28,12 +29,13 @@ main () {
     key[2] = (i >> 8) & 0xff;
     key[3] = i & 0xff;
 
-    const uint8_t *val;
+    uint8_t *val;
     size_t val_len;
 
     assert(kv_get(&kv, key, 4, &val, &val_len) == 0);
     assert(val_len == 4);
     assert(val[0] == key[0] && val[1] == key[1] && val[2] == key[2] && val[3] == key[3]);
+    free(val);
   }
 
   kv_destroy(&kv);
