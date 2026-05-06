@@ -72,17 +72,25 @@ kv_destroy (kv_t *kv) {
   kv->capacity = 0;
 }
 
-static int
-kv__put (kv_t *kv, uint8_t *new_key, size_t key_len, uint8_t *new_val, size_t val_len) {
+int
+kv_put (kv_t *kv, const uint8_t *key, size_t key_len, const uint8_t *val, size_t val_len) {
   bool found;
-  size_t i = kv__search(kv, new_key, key_len, &found);
+  size_t i = kv__search(kv, key, key_len, &found);
+
+  uint8_t *new_val;
+  if (kv__copy(&new_val, val, val_len) < 0) return -1;
 
   if (found) {
-    free(new_key);
     free(kv->entries[i].val);
     kv->entries[i].val = new_val;
     kv->entries[i].val_len = val_len;
     return 0;
+  }
+
+  uint8_t *new_key;
+  if (kv__copy(&new_key, key, key_len) < 0) {
+    free(new_val);
+    return -1;
   }
 
   if (kv->len == kv->capacity) {
@@ -111,18 +119,8 @@ kv__put (kv_t *kv, uint8_t *new_key, size_t key_len, uint8_t *new_val, size_t va
   return 0;
 }
 
-int
-kv_put (kv_t *kv, const uint8_t *key, size_t key_len, const uint8_t *val, size_t val_len) {
-  uint8_t *new_key, *new_val;
-  if (kv__copy(&new_key, key, key_len) < 0) return -1;
-  if (kv__copy(&new_val, val, val_len) < 0) {
-    free(new_key);
-    return -1;
-  }
-  return kv__put(kv, new_key, key_len, new_val, val_len);
-}
-
-static kv_status_t
+// returns 0 on hit, 1 on miss, -1 on alloc fail
+static int
 kv__lookup (kv_t *kv, const uint8_t *key, size_t key_len, uint8_t **val_out, size_t *val_len_out) {
   *val_out = NULL;
   *val_len_out = 0;
@@ -130,38 +128,27 @@ kv__lookup (kv_t *kv, const uint8_t *key, size_t key_len, uint8_t **val_out, siz
   bool found;
   size_t i = kv__search(kv, key, key_len, &found);
 
-  if (!found) return KV_NOT_FOUND;
+  if (!found) return 1;
 
   kv_entry_t *e = &kv->entries[i];
-  if (kv__copy(val_out, e->val, e->val_len) < 0) return KV_ERROR;
+  if (kv__copy(val_out, e->val, e->val_len) < 0) return -1;
   *val_len_out = e->val_len;
 
-  return KV_OK;
+  return 0;
 }
 
 int
 kv_get (kv_t *kv, const uint8_t *key, size_t key_len, uint8_t **val, size_t *val_len) {
   uint8_t *v = NULL;
   size_t vl = 0;
-  kv_status_t status = kv__lookup(kv, key, key_len, &v, &vl);
+  int rc = kv__lookup(kv, key, key_len, &v, &vl);
 
   if (val) *val = v;
   else free(v);
 
   if (val_len) *val_len = vl;
 
-  return status == KV_OK ? 0 : -1;
-}
-
-int
-kv_get_cb (kv_t *kv, const uint8_t *key, size_t key_len, kv_read_cb cb, void *data) {
-  assert(cb != NULL);
-
-  uint8_t *val = NULL;
-  size_t val_len = 0;
-  kv_status_t status = kv__lookup(kv, key, key_len, &val, &val_len);
-
-  return cb(status, key, key_len, val, val_len, data);
+  return rc == 0 ? 0 : -1;
 }
 
 int
@@ -196,10 +183,6 @@ kv_write_batch_init (kv_write_batch_t *batch, kv_t *kv, size_t hint) {
 
 void
 kv_write_batch_destroy (kv_write_batch_t *batch) {
-  for (size_t i = 0; i < batch->len; i++) {
-    free(batch->ops[i].key);
-    free(batch->ops[i].val);
-  }
   free(batch->ops);
   batch->ops = NULL;
   batch->len = 0;
@@ -221,18 +204,11 @@ int
 kv_write_batch_put (kv_write_batch_t *batch, const uint8_t *key, size_t key_len, const uint8_t *val, size_t val_len) {
   if (kv__write_batch_grow(batch) < 0) return -1;
 
-  uint8_t *new_key, *new_val;
-  if (kv__copy(&new_key, key, key_len) < 0) return -1;
-  if (kv__copy(&new_val, val, val_len) < 0) {
-    free(new_key);
-    return -1;
-  }
-
   batch->ops[batch->len++] = (kv_write_op_t){
     .del = false,
-    .key = new_key,
+    .key = key,
     .key_len = key_len,
-    .val = new_val,
+    .val = val,
     .val_len = val_len,
   };
 
@@ -243,12 +219,9 @@ int
 kv_write_batch_del (kv_write_batch_t *batch, const uint8_t *key, size_t key_len) {
   if (kv__write_batch_grow(batch) < 0) return -1;
 
-  uint8_t *new_key;
-  if (kv__copy(&new_key, key, key_len) < 0) return -1;
-
   batch->ops[batch->len++] = (kv_write_op_t){
     .del = true,
-    .key = new_key,
+    .key = key,
     .key_len = key_len,
     .val = NULL,
     .val_len = 0,
@@ -260,25 +233,17 @@ kv_write_batch_del (kv_write_batch_t *batch, const uint8_t *key, size_t key_len)
 int
 kv_write_batch_flush (kv_write_batch_t *batch) {
   int err = 0;
-  size_t i = 0;
 
-  for (; i < batch->len; i++) {
+  for (size_t i = 0; i < batch->len; i++) {
     kv_write_op_t *op = &batch->ops[i];
     if (op->del) {
       kv_del(batch->kv, op->key, op->key_len);
-      free(op->key);
     } else {
-      if (kv__put(batch->kv, op->key, op->key_len, op->val, op->val_len) < 0) {
+      if (kv_put(batch->kv, op->key, op->key_len, op->val, op->val_len) < 0) {
         err = -1;
-        i++;
         break;
       }
     }
-  }
-
-  for (; i < batch->len; i++) {
-    free(batch->ops[i].key);
-    free(batch->ops[i].val);
   }
 
   batch->len = 0;
@@ -326,26 +291,6 @@ kv_read_batch_get (kv_read_batch_t *batch, const uint8_t *key, size_t key_len, u
     .key_len = key_len,
     .val = val,
     .val_len = val_len,
-    .cb = NULL,
-    .data = NULL,
-  };
-
-  return 0;
-}
-
-int
-kv_read_batch_get_cb (kv_read_batch_t *batch, const uint8_t *key, size_t key_len, kv_read_cb cb, void *data) {
-  assert(cb != NULL);
-
-  if (kv__read_batch_grow(batch) < 0) return -1;
-
-  batch->reqs[batch->len++] = (kv_read_req_t){
-    .key = key,
-    .key_len = key_len,
-    .val = NULL,
-    .val_len = NULL,
-    .cb = cb,
-    .data = data,
   };
 
   return 0;
@@ -360,17 +305,12 @@ kv_read_batch_flush (kv_read_batch_t *batch) {
 
     uint8_t *val = NULL;
     size_t val_len = 0;
-    kv_status_t status = kv__lookup(batch->kv, req->key, req->key_len, &val, &val_len);
+    int rc = kv__lookup(batch->kv, req->key, req->key_len, &val, &val_len);
 
-    if (req->cb) {
-      int cb_ret = req->cb(status, req->key, req->key_len, val, val_len, req->data);
-      if (err == 0 && cb_ret != 0) err = cb_ret;
-    } else {
-      if (status == KV_ERROR && err == 0) err = -1;
-      if (req->val) *req->val = val;
-      else free(val);
-      if (req->val_len) *req->val_len = val_len;
-    }
+    if (rc < 0 && err == 0) err = -1;
+    if (req->val) *req->val = val;
+    else free(val);
+    if (req->val_len) *req->val_len = val_len;
   }
   batch->len = 0;
   return err;
